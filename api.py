@@ -1,6 +1,8 @@
 import os
 import html
 import re  # Importamos REGEX para caçar o lead no texto
+import csv
+import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, Form
 from fastapi.responses import Response
@@ -128,18 +130,36 @@ def conversar(Body: str = Form(...), From: str = Form(...)):
         texto_resposta = resultado['answer']
         
         # --- LÓGICA DE CAPTURA DE LEAD (Espionagem) ---
-        # Verifica se o bot soltou a "bandeira" de lead capturado
         if "LEAD_CAPTURADO:" in texto_resposta:
-            # 1. Extrai o que vem depois dos dois pontos
             match = re.search(r"LEAD_CAPTURADO:(.*)", texto_resposta)
             if match:
                 dados_lead = match.group(1).strip()
-                print(f"💰💰💰 NOVO LEAD DETECTADO: {dados_lead} 💰💰💰")
-                print(f"Salvando no banco de dados (simulado)...")
-                # AQUI entraria o código para salvar no Google Sheets ou Excel
-            
-            # 2. Limpa a mensagem para o cliente não ver o código interno
-            texto_resposta = texto_resposta.replace(match.group(0), "").strip()
+                partes = dados_lead.split("|")
+                
+                # Garante que temos 3 partes
+                if len(partes) < 3:
+                    partes = [dados_lead, "N/A", "N/A"]
+                
+                print(f"💰💰 NOVO LEAD: {dados_lead}")
+                
+                # --- SALVANDO EM CSV ---
+                arquivo_leads = "leads.csv"
+                existe = os.path.exists(arquivo_leads)
+                
+                try:
+                    with open(arquivo_leads, "a", newline="", encoding="utf-8") as f:
+                        writer = csv.writer(f)
+                        if not existe:
+                            writer.writerow(["Data", "Nome", "Contato", "Interesse"])
+                        
+                        agora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        writer.writerow([agora, partes[0].strip(), partes[1].strip(), partes[2].strip()])
+                    print("✅ Salvo no arquivo leads.csv com sucesso!")
+                except Exception as e:
+                    print(f"Erro ao salvar CSV: {e}")
+                
+                # 2. Limpa a mensagem aqui dentro, só se achou o match
+                texto_resposta = texto_resposta.replace(match.group(0), "").strip()
 
         # Corte de segurança e limpeza
         if len(texto_resposta) > 1500:
