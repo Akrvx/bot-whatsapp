@@ -1,12 +1,13 @@
 import os
 import html
+import re  # Importamos REGEX para caçar o lead no texto
 from dotenv import load_dotenv
 from fastapi import FastAPI, Form
 from fastapi.responses import Response
 
-# --- Imports de Memória e Histórico ---
+# Imports do LangChain
 from langchain_community.document_loaders import PyPDFDirectoryLoader
-# from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.embeddings import FastEmbedEmbeddings # Mantendo o leve
 from langchain_community.vectorstores import FAISS
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_text_splitters import CharacterTextSplitter
@@ -17,13 +18,10 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_community.embeddings import FastEmbedEmbeddings
 
 load_dotenv()
 app = FastAPI()
 
-# Armazena o histórico de cada número de telefone na memória RAM
-# (Se reiniciar o servidor, apaga. Para produção, usaríamos Redis)
 store = {}
 
 def get_session_history(session_id: str) -> BaseChatMessageHistory:
@@ -34,7 +32,7 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
 chain_conversa = None
 
 def carregar_bot():
-    print("--- INICIANDO SERVIDOR COM MEMÓRIA ---")
+    print("--- INICIANDO SERVIDOR VENDEDOR ---")
     caminho_pasta = "documentos"
     
     if not os.path.exists(caminho_pasta):
@@ -51,23 +49,20 @@ def carregar_bot():
         print(f"ERRO: {e}")
         return None
 
-    print("2. Processando Embeddings...")
+    print("2. Processando Embeddings (FastEmbed)...")
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs_processados = text_splitter.split_documents(documentos)
     
-    # Usamos FastEmbed em vez de HuggingFace. Ele é muito mais leve na RAM.
     embeddings = FastEmbedEmbeddings()
     vectorstore = FAISS.from_documents(docs_processados, embeddings)
     retriever = vectorstore.as_retriever()
     
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2) # Temp baixa para ser preciso
 
-    # --- PARTE 1: REFORMULADOR DE PERGUNTAS (Contextualização) ---
-    # Isso faz o bot entender "E o preço?" baseado na frase anterior
+    # --- PARTE 1: Reformulador ---
     contextualize_q_system_prompt = """
-    Dado um histórico de chat e a última pergunta do usuário (que pode não ter contexto),
+    Dado um histórico de chat e a última pergunta do usuário,
     reformule a pergunta para que ela possa ser entendida sozinha.
-    NÃO responda a pergunta, apenas reformule-a se necessário. Caso contrário, retorne-a como está.
     """
     contextualize_q_prompt = ChatPromptTemplate.from_messages([
         ("system", contextualize_q_system_prompt),
@@ -76,25 +71,31 @@ def carregar_bot():
     ])
     history_aware_retriever = create_history_aware_retriever(llm, retriever, contextualize_q_prompt)
 
-    # --- PARTE 2: A RESPOSTA FINAL (QA) ---
+    # --- PARTE 2: O VENDEDOR (Aqui está a mágica) ---
     qa_system_prompt = """
-    Você é um assistente comercial. Use o contexto abaixo para responder.
-    Se não souber, diga que não sabe.
-    Mantenha a resposta com no máximo 500 caracteres.
-    
+    Você é um Consultor de Vendas Especialista.
+    Sua missão é tirar dúvidas baseadas no contexto e CONSEGUIR O CONTATO do cliente.
+
+    REGRAS DE OURO:
+    1. Use APENAS o contexto abaixo.
+    2. Se o cliente perguntar preço ou detalhes, responda e termine perguntando: "Gostaria de agendar uma demonstração? Qual seu nome?"
+    3. SE O CLIENTE FORNECER O NOME OU TELEFONE/EMAIL:
+       - Agradeça e diga que um consultor vai entrar em contato.
+       - NO FINAL DA MENSAGEM (pule uma linha), escreva ESTRITAMENTE neste formato:
+       LEAD_CAPTURADO: [Nome do Cliente] | [Dado de Contato] | [Interesse Resumido]
+
     Contexto:
     {context}
     """
     qa_prompt = ChatPromptTemplate.from_messages([
         ("system", qa_system_prompt),
-        MessagesPlaceholder("chat_history"), # Aqui entra o histórico
+        MessagesPlaceholder("chat_history"),
         ("human", "{input}"),
     ])
     question_answer_chain = create_stuff_documents_chain(llm, qa_prompt)
     
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
-    # --- PARTE 3: GERENCIADOR DE SESSÃO ---
     conversational_rag_chain = RunnableWithMessageHistory(
         rag_chain,
         get_session_history,
@@ -103,13 +104,12 @@ def carregar_bot():
         output_messages_key="answer",
     )
     
-    print("3. Bot com Memória Pronto! 🧠")
+    print("3. Bot Vendedor Pronto! 💰")
     return conversational_rag_chain
 
 chain_conversa = carregar_bot()
 
 @app.post("/chat")
-# Adicionamos o parâmetro 'From' que o Twilio envia (é o número do zap)
 def conversar(Body: str = Form(...), From: str = Form(...)):
     if not chain_conversa:
         return Response(content="Erro: Sem documentos.", media_type="text/plain")
@@ -117,14 +117,27 @@ def conversar(Body: str = Form(...), From: str = Form(...)):
     print(f"📩 De: {From} | Diz: {Body}")
     
     try:
-        # Passamos o 'session_id' com o número da pessoa
         resultado = chain_conversa.invoke(
             {"input": Body},
             config={"configurable": {"session_id": From}}
         )
         texto_resposta = resultado['answer']
         
-        # Corte de segurança
+        # --- LÓGICA DE CAPTURA DE LEAD (Espionagem) ---
+        # Verifica se o bot soltou a "bandeira" de lead capturado
+        if "LEAD_CAPTURADO:" in texto_resposta:
+            # 1. Extrai o que vem depois dos dois pontos
+            match = re.search(r"LEAD_CAPTURADO:(.*)", texto_resposta)
+            if match:
+                dados_lead = match.group(1).strip()
+                print(f"💰💰💰 NOVO LEAD DETECTADO: {dados_lead} 💰💰💰")
+                print(f"Salvando no banco de dados (simulado)...")
+                # AQUI entraria o código para salvar no Google Sheets ou Excel
+            
+            # 2. Limpa a mensagem para o cliente não ver o código interno
+            texto_resposta = texto_resposta.replace(match.group(0), "").strip()
+
+        # Corte de segurança e limpeza
         if len(texto_resposta) > 1500:
             texto_resposta = texto_resposta[:1500] + "..."
             
@@ -144,4 +157,4 @@ def conversar(Body: str = Form(...), From: str = Form(...)):
 
 @app.get("/")
 def status():
-    return {"status": "Bot com Memória Online 🧠"}
+    return {"status": "Bot Vendedor Online 💰"}
