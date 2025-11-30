@@ -6,7 +6,7 @@ from fastapi.responses import Response
 
 # --- Imports de Memória e Histórico ---
 from langchain_community.document_loaders import PyPDFDirectoryLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
+# from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_text_splitters import CharacterTextSplitter
@@ -17,6 +17,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_community.embeddings import FastEmbedEmbeddings
 
 load_dotenv()
 app = FastAPI()
@@ -54,7 +55,8 @@ def carregar_bot():
     text_splitter = CharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs_processados = text_splitter.split_documents(documentos)
     
-    embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+    # Usamos FastEmbed em vez de HuggingFace. Ele é muito mais leve na RAM.
+    embeddings = FastEmbedEmbeddings()
     vectorstore = FAISS.from_documents(docs_processados, embeddings)
     retriever = vectorstore.as_retriever()
     
